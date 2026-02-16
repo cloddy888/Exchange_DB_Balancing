@@ -447,6 +447,16 @@ Report geschrieben:" -ForegroundColor Cyan
 Write-Host "  CSV : $csvPath"
 Write-Host "  HTML: $htmlPath"
 
+# Optional: HTML automatisch öffnen (nur bei WhatIf, damit's nicht nervt)
+if ($WhatIf) {
+    try {
+        Invoke-Item -Path $htmlPath
+    } catch {
+        Write-Warning "Konnte HTML-Report nicht automatisch öffnen: $($_.Exception.Message)"
+    }
+}
+
+
 # === Guardrails (Limits) ===
 # 1) MaxMovesPerDB / MaxMoveSumMBPerDB (optional)
 if (-not $script:MaxMovesPerDB)      { $script:MaxMovesPerDB = 0 }
