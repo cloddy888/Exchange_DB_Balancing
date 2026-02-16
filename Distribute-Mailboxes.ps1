@@ -1,5 +1,3 @@
-
-```powershell
 <#
 # Distribute-Mailboxes.ps1
 
