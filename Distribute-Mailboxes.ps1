@@ -260,8 +260,214 @@ $distributions.GetEnumerator() |
         Write-Host ("`n==> {0}: {1} Postfächer, MoveSumme: {2} MB | Volume '{3}' Free: {4}% ({5} GB)" -f $dbName,$count,[math]::Round($sumMB,2),$volLbl,$freePct,$freeGB)
     }
 
+# === Plan/Report Daten vorbereiten ===
+$plan = foreach ($db in $targetDBs) {
+    foreach ($m in $distributions[$db]) {
+        $srcDb = $null
+        try {
+            $srcDb = (Get-Mailbox -Identity $m.Identity -ErrorAction Stop).Database
+        } catch {
+            $srcDb = "UNKNOWN"
+        }
+
+        [pscustomobject]@{
+            DisplayName     = $m.DisplayName
+            Identity        = [string]$m.Identity
+            SourceDatabase  = [string]$srcDb
+            TargetDatabase  = [string]$db
+            SizeMB          = [double]$m.SizeMB
+            TargetVolLabel  = [string]$dbInfo[$db].VolLabel
+            TargetFreePct   = [int]$dbInfo[$db].FreePct
+            TargetFreeGB    = [double]$dbInfo[$db].FreeGB
+        }
+    }
+}
+
+# === Reports schreiben (CSV + HTML) ===
+# (Defaults, wenn nicht gesetzt)
+if (-not $script:ReportRoot) {
+    $script:ReportRoot = Join-Path -Path $env:TEMP -ChildPath "Distribute-Mailboxes"
+}
+
+$runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$runDir   = Join-Path -Path $script:ReportRoot -ChildPath $runStamp
+New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+
+$csvPath  = Join-Path $runDir "distribution-plan.csv"
+$htmlPath = Join-Path $runDir "distribution-plan.html"
+
+$plan | Sort-Object TargetDatabase, SizeMB -Descending | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $csvPath
+
+# HTML: Cheffe-Block + Summary + Tabellen
+$summaryRows = foreach ($db in $targetDBs) {
+    $rows = $plan | Where-Object TargetDatabase -eq $db
+    $sum  = ($rows | Measure-Object SizeMB -Sum).Sum
+    if ($null -eq $sum) { $sum = 0 }
+
+    $capGB  = [double]$dbInfo[$db].CapacityGB
+    $freeGB = [double]$dbInfo[$db].FreeGB
+    $freePctBefore = [double]$dbInfo[$db].FreePct
+
+    $moveSumGB = [math]::Round(([double]$sum / 1024), 2)
+    $projFreeGB = [math]::Round(($freeGB - $moveSumGB), 2)
+    if ($projFreeGB -lt 0) { $projFreeGB = 0 }
+
+    $projFreePct = if ($capGB -gt 0) { [math]::Round(($projFreeGB / $capGB) * 100, 0) } else { 0 }
+
+    $ampel = if ($projFreePct -lt $MinFreePercent) { "ROT" }
+             elseif ($projFreePct -lt ($MinFreePercent + 10)) { "GELB" }
+             else { "GRUEN" }
+
+    [pscustomobject]@{
+        TargetDatabase   = $db
+        MoveCount        = $rows.Count
+        MoveSumMB        = [math]::Round([double]$sum, 2)
+        VolLabel         = $dbInfo[$db].VolLabel
+        FreePctBefore    = [int]$freePctBefore
+        FreeGBBefore     = [math]::Round($freeGB, 2)
+        ProjectedFreePct = [int]$projFreePct
+        ProjectedFreeGB  = [math]::Round($projFreeGB, 2)
+        Ampel            = $ampel
+    }
+}
+
+# KPIs
+$totalMoves = $plan.Count
+$totalMB = ($plan | Measure-Object SizeMB -Sum).Sum
+if ($null -eq $totalMB) { $totalMB = 0 }
+$totalGB = [math]::Round(([double]$totalMB / 1024), 2)
+
+$minProjPct = ($summaryRows | Measure-Object ProjectedFreePct -Minimum).Minimum
+$minProjDB  = ($summaryRows | Sort-Object ProjectedFreePct | Select-Object -First 1).TargetDatabase
+
+# Top 10 größte Moves
+$top10 = $plan | Sort-Object SizeMB -Descending | Select-Object -First 10
+$top10Html = $top10 |
+    Select-Object DisplayName, SourceDatabase, TargetDatabase, SizeMB |
+    ConvertTo-Html -Fragment -PreContent "<h2>Top 10 größte Moves</h2>"
+
+# Summary-Table (manuell, damit Ampel hübsch ist)
+$summaryTable = "<h2>DB Summary (vorher / projiziert nach Plan)</h2>" +
+"<table><thead><tr>" +
+"<th>Target DB</th><th>Moves</th><th>MoveSum (MB)</th><th>Volume</th><th>Free% vorher</th><th>FreeGB vorher</th><th>Free% proj.</th><th>FreeGB proj.</th><th>Ampel</th>" +
+"</tr></thead><tbody>"
+
+foreach ($r in ($summaryRows | Sort-Object ProjectedFreePct)) {
+    $cls = switch ($r.Ampel) {
+        "GRUEN" { "badge green" }
+        "GELB"  { "badge yellow" }
+        default { "badge red" }
+    }
+
+    $summaryTable += "<tr>" +
+        "<td><b>$($r.TargetDatabase)</b></td>" +
+        "<td>$($r.MoveCount)</td>" +
+        "<td>$($r.MoveSumMB)</td>" +
+        "<td>$($r.VolLabel)</td>" +
+        "<td>$($r.FreePctBefore)%</td>" +
+        "<td>$($r.FreeGBBefore)</td>" +
+        "<td><b>$($r.ProjectedFreePct)%</b></td>" +
+        "<td><b>$($r.ProjectedFreeGB)</b></td>" +
+        "<td><span class='$cls'>$($r.Ampel)</span></td>" +
+        "</tr>"
+}
+
+$summaryTable += "</tbody></table>"
+
+# Plan-Tabelle (kompakter für Menschen)
+$planHtml = $plan |
+    Select-Object DisplayName, SourceDatabase, TargetDatabase, SizeMB |
+    Sort-Object TargetDatabase, SizeMB -Descending |
+    ConvertTo-Html -Fragment -PreContent "<h2>Plan (kompakt)</h2>"
+
+# Vollplan-Tabelle (alle Spalten) – nützlich fürs Debugging
+$fullPlanHtml = $plan |
+    Sort-Object TargetDatabase, SizeMB -Descending |
+    ConvertTo-Html -Fragment -PreContent "<h2>Plan (vollständig)</h2>"
+
+$style = @"
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:24px;}
+h1{margin-bottom:6px;}
+h2{margin-top:24px;}
+.small{color:#444;font-size:13px;}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0 10px;}
+.kpi{border:1px solid #ddd;border-radius:10px;padding:12px;background:#fafafa;}
+.kpi .label{font-size:12px;color:#666;margin-bottom:6px;}
+.kpi .value{font-size:22px;font-weight:700;}
+.kpi .sub{font-size:12px;color:#666;margin-top:6px;}
+
+.badge{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px;letter-spacing:0.5px;}
+.badge.green{background:#e7f6ea;border:1px solid #8fd19e;color:#1f7a2f;}
+.badge.yellow{background:#fff6dd;border:1px solid #f0c36d;color:#8a5a00;}
+.badge.red{background:#fde8e8;border:1px solid #f2a3a3;color:#a11616;}
+
+table{border-collapse:collapse;width:100%;}
+th,td{border:1px solid #ddd;padding:8px;font-size:13px;}
+th{background:#f2f2f2;text-align:left;}
+tr:nth-child(even){background:#fcfcfc;}
+</style>
+"@
+
+@"
+<html><head><meta charset='utf-8'>$style</head>
+<body>
+<h1>Distribute-Mailboxes Report</h1>
+<p class='small'>
+<b>Run:</b> $runStamp<br/>
+<b>WhatIf:</b> $WhatIf<br/>
+<b>MinFreePercent:</b> $MinFreePercent<br/>
+<b>TargetDBs:</b> $($targetDBs -join ', ')
+</p>
+
+<div class='kpis'>
+  <div class='kpi'><div class='label'>Gesamt Moves</div><div class='value'>$totalMoves</div><div class='sub'>geplant</div></div>
+  <div class='kpi'><div class='label'>Gesamt Volumen</div><div class='value'>$totalGB GB</div><div class='sub'>($([math]::Round([double]$totalMB,2)) MB)</div></div>
+  <div class='kpi'><div class='label'>Kritischster DB-Wert (proj.)</div><div class='value'>$minProjPct%</div><div class='sub'>DB: $minProjDB</div></div>
+  <div class='kpi'><div class='label'>Schwelle</div><div class='value'>$MinFreePercent%</div><div class='sub'>unterhalb = ROT</div></div>
+</div>
+
+$top10Html
+$summaryTable
+$planHtml
+$fullPlanHtml
+</body></html>
+"@ | Out-File -Encoding UTF8 -FilePath $htmlPath
+
+Write-Host "
+Report geschrieben:" -ForegroundColor Cyan
+Write-Host "  CSV : $csvPath"
+Write-Host "  HTML: $htmlPath"
+
+# === Guardrails (Limits) ===
+# 1) MaxMovesPerDB / MaxMoveSumMBPerDB (optional)
+if (-not $script:MaxMovesPerDB)      { $script:MaxMovesPerDB = 0 }
+if (-not $script:MaxMoveSumMBPerDB)  { $script:MaxMoveSumMBPerDB = 0 }
+
+$violations = @()
+foreach ($db in $targetDBs) {
+    $rows = $plan | Where-Object TargetDatabase -eq $db
+    $sum  = ($rows | Measure-Object SizeMB -Sum).Sum
+    if ($null -eq $sum) { $sum = 0 }
+
+    if ($script:MaxMovesPerDB -gt 0 -and $rows.Count -gt $script:MaxMovesPerDB) {
+        $violations += "DB '$db' hat $($rows.Count) Moves > MaxMovesPerDB=$($script:MaxMovesPerDB)"
+    }
+    if ($script:MaxMoveSumMBPerDB -gt 0 -and [double]$sum -gt [double]$script:MaxMoveSumMBPerDB) {
+        $violations += "DB '$db' hat MoveSumMB=$([math]::Round([double]$sum,2)) > MaxMoveSumMBPerDB=$($script:MaxMoveSumMBPerDB)"
+    }
+}
+
+if ($violations.Count -gt 0) {
+    Write-Host "
+GUARDRAIL TRIGGERED – Abbruch, weil Limits überschritten:" -ForegroundColor Red
+    $violations | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    throw "Guardrails verletzt. Passe Limits/Filter an oder reduziere Zielmenge."
+}
+
 # === Optional: MoveRequests erstellen ===
-Write-Host "\nMoveRequests:" -ForegroundColor Cyan
+Write-Host "
+MoveRequests:" -ForegroundColor Cyan
 
 foreach ($db in $targetDBs) {
     foreach ($m in $distributions[$db]) {
@@ -284,4 +490,5 @@ foreach ($db in $targetDBs) {
     }
 }
 
-Write-Host "\nDone." -ForegroundColor Green
+Write-Host "
+Done." -ForegroundColor Green
