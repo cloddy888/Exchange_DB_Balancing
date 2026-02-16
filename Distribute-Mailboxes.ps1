@@ -284,8 +284,7 @@ $plan = foreach ($db in $targetDBs) {
 }
 
 # === Reports schreiben (CSV + HTML) ===
-# (Default ReportRoot): immer relativ zum Script-Ordner (da wo das Skript liegt)
-# -> Dadurch findest du die Reports zuverlässig, egal ob EMS/RunAs/Remoting.
+# (Default ReportRoot): immer relativ zum Script-Ordner
 if (-not $script:ReportRoot -or [string]::IsNullOrWhiteSpace($script:ReportRoot)) {
     $baseDir = $PSScriptRoot
     if (-not $baseDir) {
@@ -447,7 +446,7 @@ Report geschrieben:" -ForegroundColor Cyan
 Write-Host "  CSV : $csvPath"
 Write-Host "  HTML: $htmlPath"
 
-# Optional: HTML automatisch öffnen (nur bei WhatIf, damit's nicht nervt)
+# Optional: HTML automatisch öffnen (nur bei WhatIf)
 if ($WhatIf) {
     try {
         Invoke-Item -Path $htmlPath
