@@ -38,16 +38,30 @@ param(
 # === Ziel-Datenbanken festlegen ===
 $targetDBs = @("DB01", "DB02", "DB03", "DB04")
 
-# === Mailboxen einsammeln ===
-$mailboxes = Get-Mailbox -ResultSize Unlimited | Where-Object { $_.RecipientTypeDetails -eq 'UserMailbox' } |
-    ForEach-Object {
-        $stats = Get-MailboxStatistics $_.Identity
-        [PSCustomObject]@{
-            DisplayName = $_.DisplayName
-            Identity    = $_.Identity
-            SizeMB      = [math]::Round($stats.TotalItemSize.Value.ToMB(), 2)
-        }
+# === Mailboxen einsammeln (robust) ===
+$mailboxes = Get-Mailbox -ResultSize Unlimited |
+  Where-Object { $_.RecipientTypeDetails -eq 'UserMailbox' } |
+  ForEach-Object {
+    $mbx = $_
+    $stats = $null
+
+    try {
+      $stats = Get-MailboxStatistics -Identity $mbx.Identity -ErrorAction Stop -WarningAction SilentlyContinue
+    } catch {
+      Write-Warning "Keine MailboxStatistics für '$($mbx.Identity)' → SizeMB=0 (Grund: $($_.Exception.Message))"
     }
+
+    $sizeMB = 0.0
+    if ($stats -and $stats.TotalItemSize -and $stats.TotalItemSize.Value) {
+      $sizeMB = [math]::Round($stats.TotalItemSize.Value.ToMB(), 2)
+    }
+
+    [PSCustomObject]@{
+      DisplayName = $mbx.DisplayName
+      Identity    = $mbx.Identity
+      SizeMB      = $sizeMB
+    }
+  }
 
 # === Initialisiere Verteilungsstruktur ===
 $distributions = @{}
