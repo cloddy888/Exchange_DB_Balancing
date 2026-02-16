@@ -382,7 +382,7 @@ foreach ($r in ($summaryRows | Sort-Object ProjectedFreePct)) {
 
 $summaryTable += "</tbody></table>"
 
-# Plan-Tabelle (kompakter für Menschen)
+# Plan-Tabelle (kompakter)
 $planHtml = $plan |
     Select-Object DisplayName, SourceDatabase, TargetDatabase, SizeMB |
     Sort-Object TargetDatabase, SizeMB -Descending |
