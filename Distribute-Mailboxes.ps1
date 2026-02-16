@@ -1,3 +1,38 @@
+
+```powershell
+<#
+# Distribute-Mailboxes.ps1
+
+## Synopsis
+Dieses Skript sammelt alle **UserMailbox**-Postfächer, ermittelt pro Postfach die **Größe in MB** und verteilt die Postfächer anschließend **gewichtet** auf definierte **Ziel-Mailboxdatenbanken**.
+
+Verteil-Logik (Load-Score):
+**LoadScore = (MailboxCount × 10) + (SumSizeMB)**
+
+Für jedes Postfach wird die DB mit dem aktuell kleinsten Load-Score gewählt. Danach wird eine Übersicht je DB ausgegeben und optional werden MoveRequests erstellt.
+
+Hinweis: MoveRequests werden mit `-SuspendWhenReadyToComplete` angelegt, damit der finale Cutover gezielt im Wartungsfenster erfolgen kann.
+
+## Parameter
+- `-WhatIf`  
+  Simulation: Keine MoveRequests, nur Ausgabe der geplanten Aktionen.
+
+## Beispiele
+Planung (Simulation):
+    .\Distribute-Mailboxes.ps1 -WhatIf
+
+Ausführung (MoveRequests erstellen):
+    .\Distribute-Mailboxes.ps1
+
+Move-Status prüfen:
+    Get-MoveRequest | Get-MoveRequestStatistics |
+      Select DisplayName, Status, PercentComplete, TotalMailboxSize, TargetDatabase
+
+Finalisierung im Wartungsfenster:
+    Get-MoveRequest -MoveStatus Suspended | Resume-MoveRequest
+#>
+
+
 param(
     [switch]$WhatIf
 )
