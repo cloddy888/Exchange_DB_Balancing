@@ -284,9 +284,17 @@ $plan = foreach ($db in $targetDBs) {
 }
 
 # === Reports schreiben (CSV + HTML) ===
-# (Defaults, wenn nicht gesetzt)
-if (-not $script:ReportRoot) {
-    $script:ReportRoot = Join-Path -Path $env:TEMP -ChildPath "Distribute-Mailboxes"
+# (Default ReportRoot): immer relativ zum Script-Ordner (da wo das Skript liegt)
+# -> Dadurch findest du die Reports zuverlässig, egal ob EMS/RunAs/Remoting.
+if (-not $script:ReportRoot -or [string]::IsNullOrWhiteSpace($script:ReportRoot)) {
+    $baseDir = $PSScriptRoot
+    if (-not $baseDir) {
+        # Fallback, falls ausnahmsweise kein Script-Kontext vorhanden ist
+        $baseDir = (Get-Location).Path
+    }
+
+    $reportsDir = Join-Path -Path $baseDir -ChildPath "Reports"
+    $script:ReportRoot = Join-Path -Path $reportsDir -ChildPath "Distribute-Mailboxes"
 }
 
 $runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -298,7 +306,7 @@ $htmlPath = Join-Path $runDir "distribution-plan.html"
 
 $plan | Sort-Object TargetDatabase, SizeMB -Descending | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $csvPath
 
-# HTML: Cheffe-Block + Summary + Tabellen
+# HTML: Report-Block + Summary + Tabellen
 $summaryRows = foreach ($db in $targetDBs) {
     $rows = $plan | Where-Object TargetDatabase -eq $db
     $sum  = ($rows | Measure-Object SizeMB -Sum).Sum
