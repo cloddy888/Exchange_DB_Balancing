@@ -61,6 +61,14 @@ param(
 
     [int]$MinFreePercent = 25,
 
+    # Optional: zusätzliche Sicherheit für die Log-Projektion bei Moves.
+    # Faustformel: MoveSumGB * LogGrowthFactorGBPerMovedGB ergibt geschätztes Log-Wachstum (GB).
+    # Default 0.30 = konservativ (30% der moved GB als Log-Headroom). Bei sehr großen Moves ggf. höher setzen.
+    [double]$LogGrowthFactorGBPerMovedGB = 0.30,
+
+    # Mindest-Frei% für das LOG-Volume (separat). DBs deren Log-Volume darunter liegt, werden NICHT genutzt.
+    [int]$MinLogFreePercent = 30,
+
     [string[]]$ExcludeDBs = @(),
 
     [string[]]$IncludeDBs = @()
@@ -144,31 +152,65 @@ $dbInfo = @{}
 foreach ($dbName in @($targetDBs)) {
     $dbObj   = Get-MailboxDatabase -Identity $dbName -Status
     $edbPath = $dbObj.EdbFilePath.PathName
+    $logPath = $null
+    try { $logPath = $dbObj.LogFolderPath.PathName } catch { $logPath = $null }
 
     $vol = Get-VolumeInfoForPath -Path $edbPath
+    $logVol = $null
+    if ($logPath) {
+        $logVol = Get-VolumeInfoForPath -Path $logPath
+    } else {
+        $logVol = [pscustomobject]@{ Label="UNKNOWN"; Name="UNKNOWN"; CapacityGB=0.0; FreeGB=0.0; FreePct=0 }
+    }
+
+    $dbSizeGB = 0.0
+    $whitespaceGB = 0.0
+    try {
+        if ($dbObj.DatabaseSize) { $dbSizeGB = [math]::Round(($dbObj.DatabaseSize.ToBytes() / 1GB), 2) }
+    } catch { $dbSizeGB = 0.0 }
+
+    try {
+        if ($dbObj.AvailableNewMailboxSpace) { $whitespaceGB = [math]::Round(($dbObj.AvailableNewMailboxSpace.ToBytes() / 1GB), 2) }
+    } catch { $whitespaceGB = 0.0 }
 
     $dbInfo[$dbName] = [pscustomobject]@{
-        DBName     = $dbName
-        EdbPath    = $edbPath
-        VolLabel   = $vol.Label
-        VolName    = $vol.Name
-        CapacityGB = $vol.CapacityGB
-        FreeGB     = $vol.FreeGB
-        FreePct    = $vol.FreePct
+        DBName        = $dbName
+        EdbPath       = $edbPath
+        LogPath       = $logPath
+
+        VolLabel      = $vol.Label
+        VolName       = $vol.Name
+        CapacityGB    = $vol.CapacityGB
+        FreeGB        = $vol.FreeGB
+        FreePct       = $vol.FreePct
+
+        LogVolLabel   = $logVol.Label
+        LogVolName    = $logVol.Name
+        LogCapGB      = $logVol.CapacityGB
+        LogFreeGB     = $logVol.FreeGB
+        LogFreePct    = $logVol.FreePct
+
+        DbSizeGB      = $dbSizeGB
+        WhitespaceGB  = $whitespaceGB
     }
 }
 
-Write-Host "\nDB/Volume Übersicht (Exchange-DBName ↔ Volume):" -ForegroundColor Cyan
-$dbInfo.Values | Sort-Object FreePct | Format-Table DBName, VolLabel, FreePct, FreeGB, CapacityGB, EdbPath -AutoSize
+
+Write-Host "
+DB/Volume Übersicht (Exchange-DBName ↔ Volume):" -ForegroundColor Cyan
+$dbInfo.Values | Sort-Object FreePct | Format-Table DBName, VolLabel, FreePct, FreeGB, CapacityGB, LogVolLabel, LogFreePct, LogFreeGB, LogCapGB, DbSizeGB, WhitespaceGB, EdbPath -AutoSize
 
 # === Filter DBs by MinFreePercent ===
-$targetDBs = $targetDBs | Where-Object { $dbInfo[$_].FreePct -ge $MinFreePercent }
-
-if (-not $targetDBs -or $targetDBs.Count -lt 1) {
-    throw "Nach MinFreePercent=$MinFreePercent bleibt keine Ziel-DB übrig."
+$targetDBs = $targetDBs | Where-Object {
+    ($dbInfo[$_].FreePct -ge $MinFreePercent) -and ($dbInfo[$_].LogFreePct -ge $MinLogFreePercent)
 }
 
-Write-Host "\nZiel-DBs nach Filter (MinFreePercent=$MinFreePercent): $($targetDBs -join ', ')" -ForegroundColor Cyan
+if (-not $targetDBs -or $targetDBs.Count -lt 1) {
+    throw "Nach Filtern bleibt keine Ziel-DB übrig. MinFreePercent=$MinFreePercent (DB) / MinLogFreePercent=$MinLogFreePercent (LOG)."
+}
+
+Write-Host "
+Ziel-DBs nach Filter (MinFreePercent=$MinFreePercent / MinLogFreePercent=$MinLogFreePercent): $($targetDBs -join ', ')" -ForegroundColor Cyan
 
 # === Mailboxes sammeln (robust) ===
 Write-Host "\nSammle UserMailbox-Mailboxen…" -ForegroundColor Cyan
@@ -276,15 +318,22 @@ $plan = foreach ($db in $targetDBs) {
             SourceDatabase  = [string]$srcDb
             TargetDatabase  = [string]$db
             SizeMB          = [double]$m.SizeMB
+
             TargetVolLabel  = [string]$dbInfo[$db].VolLabel
             TargetFreePct   = [int]$dbInfo[$db].FreePct
             TargetFreeGB    = [double]$dbInfo[$db].FreeGB
+
+            LogVolLabel     = [string]$dbInfo[$db].LogVolLabel
+            LogFreePct      = [int]$dbInfo[$db].LogFreePct
+            LogFreeGB       = [double]$dbInfo[$db].LogFreeGB
         }
     }
 }
 
+
 # === Reports schreiben (CSV + HTML) ===
-# (Default ReportRoot): immer relativ zum Script-Ordner
+# (Default ReportRoot): immer relativ zum Script-Ordner (da wo das Skript liegt)
+# -> Dadurch findest du die Reports zuverlässig, egal ob EMS/RunAs/Remoting.
 if (-not $script:ReportRoot -or [string]::IsNullOrWhiteSpace($script:ReportRoot)) {
     $baseDir = $PSScriptRoot
     if (-not $baseDir) {
@@ -305,7 +354,7 @@ $htmlPath = Join-Path $runDir "distribution-plan.html"
 
 $plan | Sort-Object TargetDatabase, SizeMB -Descending | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $csvPath
 
-# HTML: Report-Block + Summary + Tabellen
+# HTML: Summary + Tabellen
 $summaryRows = foreach ($db in $targetDBs) {
     $rows = $plan | Where-Object TargetDatabase -eq $db
     $sum  = ($rows | Measure-Object SizeMB -Sum).Sum
@@ -316,25 +365,80 @@ $summaryRows = foreach ($db in $targetDBs) {
     $freePctBefore = [double]$dbInfo[$db].FreePct
 
     $moveSumGB = [math]::Round(([double]$sum / 1024), 2)
-    $projFreeGB = [math]::Round(($freeGB - $moveSumGB), 2)
+
+    # Wichtiger Check:
+    # - Mailbox-Move "Größe" != 1:1 EDB-Wachstum
+    # - Ziel-DB hat evtl. bereits Whitespace (AvailableNewMailboxSpace), der das Wachstum abfedert
+    # -> Ttatsächliches notwendiges EDB/Volume-Wachstum als: max(0, MoveSumGB - WhitespaceGB) * SafetyFactor
+
+    $whitespaceGB = 0.0
+    try { $whitespaceGB = [double]$dbInfo[$db].WhitespaceGB } catch { $whitespaceGB = 0.0 }
+
+    $safetyFactor = 1.10  # 10% Puffer (Header/Overhead/Unschärfe)
+    $neededGrowthGB = [math]::Max(0.0, ($moveSumGB - $whitespaceGB)) * $safetyFactor
+    $neededGrowthGB = [math]::Round($neededGrowthGB, 2)
+
+    # Logs liegen separat:
+    # Sehr grobe (aber praktische) Projektion für Log-Headroom während großer Moves.
+    # Default: 30% der moved GB als zusätzlicher Log-Bedarf (anpassbar via -LogGrowthFactorGBPerMovedGB)
+    $logNeededGB = [math]::Round(($moveSumGB * [double]$LogGrowthFactorGBPerMovedGB), 2)
+
+    $projFreeGB = [math]::Round(($freeGB - $neededGrowthGB), 2)
     if ($projFreeGB -lt 0) { $projFreeGB = 0 }
 
     $projFreePct = if ($capGB -gt 0) { [math]::Round(($projFreeGB / $capGB) * 100, 0) } else { 0 }
 
-    $ampel = if ($projFreePct -lt $MinFreePercent) { "ROT" }
-             elseif ($projFreePct -lt ($MinFreePercent + 10)) { "GELB" }
+    # Log-Projektion
+    $logFreeGB = 0.0
+    $logCapGB  = 0.0
+    try { $logFreeGB = [double]$dbInfo[$db].LogFreeGB } catch { $logFreeGB = 0.0 }
+    try { $logCapGB  = [double]$dbInfo[$db].LogCapGB } catch { $logCapGB = 0.0 }
+
+    $projLogFreeGB = [math]::Round(($logFreeGB - $logNeededGB), 2)
+    if ($projLogFreeGB -lt 0) { $projLogFreeGB = 0 }
+
+    $projLogFreePct = if ($logCapGB -gt 0) { [math]::Round(($projLogFreeGB / $logCapGB) * 100, 0) } else { 0 }
+
+    # Ampel für DB-Volume (EDB)
+    $ampelDb = if ($projFreePct -lt $MinFreePercent) { "ROT" }
+               elseif ($projFreePct -lt ($MinFreePercent + 10)) { "GELB" }
+               else { "GRUEN" }
+
+    # Ampel für LOG-Volume
+    $ampelLog = if ($projLogFreePct -lt $MinLogFreePercent) { "ROT" }
+                elseif ($projLogFreePct -lt ($MinLogFreePercent + 10)) { "GELB" }
+                else { "GRUEN" }
+
+    # Gesamtampel = schlechtester Wert
+    $ampel = if ($ampelDb -eq "ROT" -or $ampelLog -eq "ROT") { "ROT" }
+             elseif ($ampelDb -eq "GELB" -or $ampelLog -eq "GELB") { "GELB" }
              else { "GRUEN" }
 
-    [pscustomobject]@{
-        TargetDatabase   = $db
-        MoveCount        = $rows.Count
-        MoveSumMB        = [math]::Round([double]$sum, 2)
-        VolLabel         = $dbInfo[$db].VolLabel
-        FreePctBefore    = [int]$freePctBefore
-        FreeGBBefore     = [math]::Round($freeGB, 2)
-        ProjectedFreePct = [int]$projFreePct
-        ProjectedFreeGB  = [math]::Round($projFreeGB, 2)
-        Ampel            = $ampel
+    $ampel = if ($projFreePct -lt $MinFreePercent) { "ROT" }
+             elseif ($projFreePct -lt ($MinFreePercent + 10)) { "GELB" }
+             else { "GRUEN" }    [pscustomobject]@{
+        TargetDatabase      = $db
+        MoveCount           = $rows.Count
+        MoveSumMB           = [math]::Round([double]$sum, 2)
+        VolLabel            = $dbInfo[$db].VolLabel
+        FreePctBefore       = [int]$freePctBefore
+        FreeGBBefore        = [math]::Round($freeGB, 2)
+        WhitespaceGB        = [math]::Round([double]$whitespaceGB, 2)
+        NeededGrowthGB      = [math]::Round([double]$neededGrowthGB, 2)
+        ProjectedFreePct    = [int]$projFreePct
+        ProjectedFreeGB     = [math]::Round($projFreeGB, 2)
+
+        AmpelDB            = $ampelDb
+        AmpelLog           = $ampelLog
+
+        LogVolLabel         = $dbInfo[$db].LogVolLabel
+        LogFreePctBefore    = [int]$dbInfo[$db].LogFreePct
+        LogFreeGBBefore     = [math]::Round([double]$dbInfo[$db].LogFreeGB, 2)
+        LogNeededGB         = [math]::Round([double]$logNeededGB, 2)
+        ProjectedLogFreePct = [int]$projLogFreePct
+        ProjectedLogFreeGB  = [math]::Round($projLogFreeGB, 2)
+
+        Ampel               = $ampel
     }
 }
 
@@ -353,13 +457,26 @@ $top10Html = $top10 |
     Select-Object DisplayName, SourceDatabase, TargetDatabase, SizeMB |
     ConvertTo-Html -Fragment -PreContent "<h2>Top 10 größte Moves</h2>"
 
-# Summary-Table (manuell, damit Ampel hübsch ist)
+# Summary-Table 
 $summaryTable = "<h2>DB Summary (vorher / projiziert nach Plan)</h2>" +
+"<p class='small'>Hinweis: <b>projiziert</b> ist eine Schätzung des <b>zusätzlichen</b> Volume-Bedarfs der Ziel-DB: max(0, MoveSumGB − WhitespaceGB) × 1.10. Mailbox-Größe ist nicht 1:1 EDB-Wachstum; vorhandener Whitespace kann Wachstum abfedern. <br/>Logs liegen separat: geschätzter Log-Headroom = MoveSumGB × <b>$LogGrowthFactorGBPerMovedGB</b> (anpassbar via -LogGrowthFactorGBPerMovedGB).</p>" +
 "<table><thead><tr>" +
-"<th>Target DB</th><th>Moves</th><th>MoveSum (MB)</th><th>Volume</th><th>Free% vorher</th><th>FreeGB vorher</th><th>Free% proj.</th><th>FreeGB proj.</th><th>Ampel</th>" +
-"</tr></thead><tbody>"
+"<th>Target DB</th><th>Moves</th><th>MoveSum (MB)</th><th>Volume</th><th>Free% vorher</th><th>FreeGB vorher</th><th>Whitespace (GB)</th><th>NeedGrowth (GB)</th><th>Free% proj.</th><th>FreeGB proj.</th><th>DB Ampel</th><th>LogVol</th><th>LogFree% vorher</th><th>LogFreeGB vorher</th><th>LogNeed (GB)</th><th>LogFree% proj.</th><th>LogFreeGB proj.</th><th>Log Ampel</th><th>Gesamt</th>" +
+"</tr></thead><tbody>""</tr></thead><tbody>"
 
 foreach ($r in ($summaryRows | Sort-Object ProjectedFreePct)) {
+    $clsDb = switch ($r.AmpelDB) {
+        "GRUEN" { "badge green" }
+        "GELB"  { "badge yellow" }
+        default { "badge red" }
+    }
+
+    $clsLog = switch ($r.AmpelLog) {
+        "GRUEN" { "badge green" }
+        "GELB"  { "badge yellow" }
+        default { "badge red" }
+    }
+
     $cls = switch ($r.Ampel) {
         "GRUEN" { "badge green" }
         "GELB"  { "badge yellow" }
@@ -373,15 +490,25 @@ foreach ($r in ($summaryRows | Sort-Object ProjectedFreePct)) {
         "<td>$($r.VolLabel)</td>" +
         "<td>$($r.FreePctBefore)%</td>" +
         "<td>$($r.FreeGBBefore)</td>" +
+        "<td>$($r.WhitespaceGB)</td>" +
+        "<td><b>$($r.NeededGrowthGB)</b></td>" +
         "<td><b>$($r.ProjectedFreePct)%</b></td>" +
         "<td><b>$($r.ProjectedFreeGB)</b></td>" +
+        "<td><span class='$clsDb'>$($r.AmpelDB)</span></td>" +
+        "<td>$($r.LogVolLabel)</td>" +
+        "<td>$($r.LogFreePctBefore)%</td>" +
+        "<td>$($r.LogFreeGBBefore)</td>" +
+        "<td><b>$($r.LogNeededGB)</b></td>" +
+        "<td><b>$($r.ProjectedLogFreePct)%</b></td>" +
+        "<td><b>$($r.ProjectedLogFreeGB)</b></td>" +
+        "<td><span class='$clsLog'>$($r.AmpelLog)</span></td>" +
         "<td><span class='$cls'>$($r.Ampel)</span></td>" +
         "</tr>"
 }
 
 $summaryTable += "</tbody></table>"
 
-# Plan-Tabelle (kompakter)
+# Plan-Tabelle
 $planHtml = $plan |
     Select-Object DisplayName, SourceDatabase, TargetDatabase, SizeMB |
     Sort-Object TargetDatabase, SizeMB -Descending |
@@ -445,16 +572,6 @@ Write-Host "
 Report geschrieben:" -ForegroundColor Cyan
 Write-Host "  CSV : $csvPath"
 Write-Host "  HTML: $htmlPath"
-
-# Optional: HTML automatisch öffnen (nur bei WhatIf)
-if ($WhatIf) {
-    try {
-        Invoke-Item -Path $htmlPath
-    } catch {
-        Write-Warning "Konnte HTML-Report nicht automatisch öffnen: $($_.Exception.Message)"
-    }
-}
-
 
 # === Guardrails (Limits) ===
 # 1) MaxMovesPerDB / MaxMoveSumMBPerDB (optional)
