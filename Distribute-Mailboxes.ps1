@@ -54,7 +54,7 @@ Distribute-Mailboxes.ps1
 param(
     [switch]$WhatIf,
 
-    [int]$MinFreePercent = 25,
+    [int]$MinFreePercent = 5,
 
     [double]$LogGrowthFactorGBPerMovedGB = 0.30,
 
