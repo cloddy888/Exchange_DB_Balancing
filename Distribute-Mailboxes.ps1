@@ -459,7 +459,7 @@ $top10Html = $top10 |
 
 # Summary-Table 
 $summaryTable = "<h2>DB Summary (vorher / projiziert nach Plan)</h2>" +
-"<p class='small'>Hinweis: <b>projiziert</b> ist eine Schätzung des <b>zusätzlichen</b> Volume-Bedarfs der Ziel-DB: max(0, MoveSumGB − WhitespaceGB) × 1.10. Mailbox-Größe ist nicht 1:1 EDB-Wachstum; vorhandener Whitespace kann Wachstum abfedern. <br/>Logs liegen separat: geschätzter Log-Headroom = MoveSumGB × <b>$LogGrowthFactorGBPerMovedGB</b> (anpassbar via -LogGrowthFactorGBPerMovedGB).</p>" +
+"<p class='small'>Hinweis: <b>projiziert</b> ist eine Schätzung des <b>zusätzlichen</b> Volume-Bedarfs der Ziel-DB: max(0, MoveSumGB - WhitespaceGB) x 1.10. Mailbox-Größe ist nicht 1:1 EDB-Wachstum; vorhandener Whitespace kann Wachstum abfedern. <br/>Logs liegen separat: geschätzter Log-Headroom = MoveSumGB x <b>$LogGrowthFactorGBPerMovedGB</b> (anpassbar via -LogGrowthFactorGBPerMovedGB).</p>" +
 "<table><thead><tr>" +
 "<th>Target DB</th><th>Moves</th><th>MoveSum (MB)</th><th>Volume</th><th>Free% vorher</th><th>FreeGB vorher</th><th>Whitespace (GB)</th><th>NeedGrowth (GB)</th><th>Free% proj.</th><th>FreeGB proj.</th><th>DB Ampel</th><th>LogVol</th><th>LogFree% vorher</th><th>LogFreeGB vorher</th><th>LogNeed (GB)</th><th>LogFree% proj.</th><th>LogFreeGB proj.</th><th>Log Ampel</th><th>Gesamt</th>" +
 "</tr></thead><tbody>""</tr></thead><tbody>"
