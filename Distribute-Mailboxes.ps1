@@ -22,7 +22,7 @@ Distribute-Mailboxes.ps1
   Simulation: Es werden keine MoveRequests erstellt, nur Verteilung + Reports.
 
 .PARAMETER MinFreePercent
-  Mindest-Frei% auf dem DB-Volume (EDB) – Default: 25
+  Mindest-Frei% auf dem DB-Volume (EDB) – Default: 35
 
 .PARAMETER MinLogFreePercent
   Mindest-Frei% auf dem LOG-Volume – Default: 30
@@ -36,12 +36,15 @@ Distribute-Mailboxes.ps1
 .PARAMETER MaxTotalMoveGB
   Optional: pro Run nur bis X GB Gesamtmove planen (0 = aus)
 
+.PARAMETER MaxMovesPerDB / MaxMoveSumMBPerDB
+  Optional: zusätzliche Limits pro DB (0 = aus). Guardrails sind trotzdem immer aktiv (Schwellen + Projektion).
+
 .EXAMPLE
   Nur planen, nix schieben:
     .\Distribute-Mailboxes.ps1 -WhatIf
 
   Batch 1 planen:
-    .\Distribute-Mailboxes.ps1 -WhatIf -BatchSize 200 -BatchNumber 1 -MinFreePercent 25 -MinLogFreePercent 30
+    .\Distribute-Mailboxes.ps1 -WhatIf -BatchSize 200 -BatchNumber 1
 
   Ausführung:
     .\Distribute-Mailboxes.ps1
@@ -54,21 +57,22 @@ Distribute-Mailboxes.ps1
 param(
     [switch]$WhatIf,
 
-    [int]$MinFreePercent = 5,
-
+    [int]$MinFreePercent = 35,
+    [int]$MinLogFreePercent = 30,
     [double]$LogGrowthFactorGBPerMovedGB = 0.30,
 
-    [int]$MinLogFreePercent = 30,
-
     [string[]]$ExcludeDBs = @(),
-
     [string[]]$IncludeDBs = @(),
 
-    # --- Batch/Wellensteuerung ---
+    # optionale Zusatzlimits (immer geprüft, aber 0 = "kein Limit")
+    [int]$MaxMovesPerDB = 0,
+    [double]$MaxMoveSumMBPerDB = 0,
+
+    # Batch/Wellen
     [int]$BatchSize = 0,
     [int]$BatchNumber = 1,
 
-    # Optional: zusätzliches Limit für die geplante Gesamtmenge (GB) pro Run (0 = aus)
+    # optional: Limit Gesamtmenge pro Run (GB)
     [double]$MaxTotalMoveGB = 0
 )
 
@@ -88,6 +92,7 @@ function Get-VolumeInfoForPath {
 
     $vols = Get-CimInstance Win32_Volume | Where-Object { $_.DriveType -eq 3 -and $_.Capacity -gt 0 }
 
+    # Best match = longest mountpoint prefix
     $match = $vols |
         Where-Object { $p -like "$($_.Name)*" } |
         Sort-Object { $_.Name.Length } -Descending |
@@ -124,8 +129,8 @@ function Get-SafeSumMB {
 }
 
 Write-Host "Distribute-Mailboxes start (WhatIf=$WhatIf)" -ForegroundColor Cyan
-Write-Host ("Params: MinFreePercent={0} / MinLogFreePercent={1} / LogGrowthFactor={2} / BatchSize={3} / BatchNumber={4} / MaxTotalMoveGB={5}" -f `
-    $MinFreePercent,$MinLogFreePercent,$LogGrowthFactorGBPerMovedGB,$BatchSize,$BatchNumber,$MaxTotalMoveGB) -ForegroundColor DarkCyan
+Write-Host ("Params: MinFreePercent(DB)={0} / MinLogFreePercent(LOG)={1} / LogGrowthFactor={2} / BatchSize={3} / BatchNumber={4} / MaxTotalMoveGB={5} / MaxMovesPerDB={6} / MaxMoveSumMBPerDB={7}" -f `
+    $MinFreePercent,$MinLogFreePercent,$LogGrowthFactorGBPerMovedGB,$BatchSize,$BatchNumber,$MaxTotalMoveGB,$MaxMovesPerDB,$MaxMoveSumMBPerDB) -ForegroundColor DarkCyan
 
 # === Target DBs auto-detect ===
 $targetDBs = Get-MailboxDatabase -Status |
@@ -152,12 +157,7 @@ foreach ($dbName in @($targetDBs)) {
     try { $logPath = $dbObj.LogFolderPath.PathName } catch { $logPath = $null }
 
     $vol = Get-VolumeInfoForPath -Path $edbPath
-
-    $logVol = if ($logPath) {
-        Get-VolumeInfoForPath -Path $logPath
-    } else {
-        [pscustomobject]@{ Label="UNKNOWN"; Name="UNKNOWN"; CapacityGB=0.0; FreeGB=0.0; FreePct=0 }
-    }
+    $logVol = if ($logPath) { Get-VolumeInfoForPath -Path $logPath } else { [pscustomobject]@{ Label="UNKNOWN"; Name="UNKNOWN"; CapacityGB=0.0; FreeGB=0.0; FreePct=0 } }
 
     $dbSizeGB = 0.0
     $whitespaceGB = 0.0
@@ -191,7 +191,7 @@ $dbInfo.Values |
     Sort-Object FreePct |
     Format-Table DBName, VolLabel, FreePct, FreeGB, CapacityGB, LogVolLabel, LogFreePct, LogFreeGB, LogCapGB, DbSizeGB, WhitespaceGB, EdbPath -AutoSize
 
-# === Filter: nur DBs, die JETZT schon die Mindestwerte erfüllen ===
+# === Filter: nur DBs, die JETZT schon Mindestwerte erfüllen ===
 $targetDBs = $targetDBs | Where-Object {
     ($dbInfo[$_].FreePct -ge $MinFreePercent) -and ($dbInfo[$_].LogFreePct -ge $MinLogFreePercent)
 }
@@ -289,6 +289,7 @@ foreach ($db in $targetDBs) {
 }
 
 function Get-ProjectedAfter {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DatabaseName,
         [Parameter(Mandatory)][double]$AddMoveGB
@@ -296,9 +297,9 @@ function Get-ProjectedAfter {
 
     $s = $dbState[$DatabaseName]
 
-    $newAssigned = $s.AssignedMoveGB + $AddMoveGB
+    $newAssigned     = $s.AssignedMoveGB + $AddMoveGB
     $newNeededGrowth = [math]::Max(0.0, ($newAssigned - $s.WhitespaceGB0)) * $s.SafetyFactor
-    $newLogNeeded = $s.LogNeededGB + ($AddMoveGB * [double]$LogGrowthFactorGBPerMovedGB)
+    $newLogNeeded    = $s.LogNeededGB + ($AddMoveGB * [double]$LogGrowthFactorGBPerMovedGB)
 
     $projFreeGB = $s.FreeGB0 - $newNeededGrowth
     if ($projFreeGB -lt 0) { $projFreeGB = 0 }
@@ -337,13 +338,12 @@ foreach ($mb in $mailboxes) {
         if ($cand.ProjLogFreePct -lt $MinLogFreePercent) { continue }
 
         # Simuliere used%-Vector für alle DBs
-        $usedPcts = @()
-        foreach ($d in $targetDBs) {
+        $usedPcts = foreach ($d in $targetDBs) {
             if ($d -eq $db) {
-                $usedPcts += (100.0 - [double]$cand.ProjFreePct)
+                100.0 - [double]$cand.ProjFreePct
             } else {
                 $cur = Get-ProjectedAfter -DatabaseName $d -AddMoveGB 0
-                $usedPcts += (100.0 - [double]$cur.ProjFreePct)
+                100.0 - [double]$cur.ProjFreePct
             }
         }
 
@@ -423,7 +423,7 @@ $htmlPath = Join-Path $runDir "distribution-plan.html"
 
 $plan | Sort-Object TargetDatabase, SizeMB -Descending | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $csvPath
 
-# Summary Rows (mit DB+LOG Ampel getrennt)
+# Summary Rows
 $summaryRows = foreach ($db in $targetDBs) {
     $rows = $plan | Where-Object TargetDatabase -eq $db
     $sumMB = ($rows | Measure-Object SizeMB -Sum).Sum
@@ -454,7 +454,6 @@ $summaryRows = foreach ($db in $targetDBs) {
     if ($projLogFreeGB -lt 0) { $projLogFreeGB = 0 }
     $projLogFreePct = if ($logCapGB -gt 0) { [int]([math]::Round(($projLogFreeGB / $logCapGB) * 100, 0)) } else { 0 }
 
-    # Ampeln
     $ampelDb = if ($projFreePct -lt $MinFreePercent) { "ROT" }
                elseif ($projFreePct -lt ($MinFreePercent + 10)) { "GELB" }
                else { "GRUEN" }
@@ -510,7 +509,7 @@ $top10Html = $top10 |
     Select-Object DisplayName, SourceDatabase, TargetDatabase, SizeMB |
     ConvertTo-Html -Fragment -PreContent "<h2>Top 10 größte Moves</h2>"
 
-# Summary Table HTML (manuell, Ampeln hübsch)
+# Summary HTML
 $summaryTable = @()
 $summaryTable += "<h2>DB Summary (vorher / projiziert nach Plan)</h2>"
 $summaryTable += "<p class='small'>Hinweis: <b>projiziert</b> ist eine Schätzung des <b>zusätzlichen</b> DB-Volume-Bedarfs: max(0, MoveSumGB - WhitespaceGB) × 1.10. Logs separat: LogNeed = MoveSumGB × <b>$LogGrowthFactorGBPerMovedGB</b>.</p>"
@@ -616,28 +615,47 @@ if ($WhatIf) {
     try { Invoke-Item -Path $htmlPath } catch { Write-Warning "Konnte HTML-Report nicht automatisch öffnen: $($_.Exception.Message)" }
 }
 
-# === Guardrails (optional Limits) ===
-if (-not $script:MaxMovesPerDB)     { $script:MaxMovesPerDB = 0 }
-if (-not $script:MaxMoveSumMBPerDB) { $script:MaxMoveSumMBPerDB = 0 }
-
+# ============================================================
+# === GUARDRAILS (IMMER AN) – blockt vor MoveRequest-Erstellung
+# ============================================================
 $violations = @()
+
+# A) Optional Zusatzlimits pro DB (0 = kein Limit), aber immer geprüft
 foreach ($db in $targetDBs) {
     $rows = $plan | Where-Object TargetDatabase -eq $db
     $sum  = ($rows | Measure-Object SizeMB -Sum).Sum
     if ($null -eq $sum) { $sum = 0 }
 
-    if ($script:MaxMovesPerDB -gt 0 -and $rows.Count -gt $script:MaxMovesPerDB) {
-        $violations += "DB '$db' hat $($rows.Count) Moves > MaxMovesPerDB=$($script:MaxMovesPerDB)"
+    if ($MaxMovesPerDB -gt 0 -and $rows.Count -gt $MaxMovesPerDB) {
+        $violations += "DB '$db' hat $($rows.Count) Moves > MaxMovesPerDB=$MaxMovesPerDB"
     }
-    if ($script:MaxMoveSumMBPerDB -gt 0 -and [double]$sum -gt [double]$script:MaxMoveSumMBPerDB) {
-        $violations += "DB '$db' hat MoveSumMB=$([math]::Round([double]$sum,2)) > MaxMoveSumMBPerDB=$($script:MaxMoveSumMBPerDB)"
+    if ($MaxMoveSumMBPerDB -gt 0 -and [double]$sum -gt [double]$MaxMoveSumMBPerDB) {
+        $violations += "DB '$db' hat MoveSumMB=$([math]::Round([double]$sum,2)) > MaxMoveSumMBPerDB=$MaxMoveSumMBPerDB"
+    }
+}
+
+# B) Finaler Reality-Check: projizierte Free% dürfen NICHT unter die Schwellen fallen
+foreach ($db in $targetDBs) {
+    $st = $dbState[$db]
+
+    $projDbFreeGB  = [math]::Max(0.0, ($st.FreeGB0 - $st.NeededGrowthGB))
+    $projDbFreePct = if ($st.CapGB -gt 0) { [math]::Round(($projDbFreeGB / $st.CapGB) * 100, 0) } else { 0 }
+
+    $projLogFreeGB  = [math]::Max(0.0, ($st.LogFreeGB0 - $st.LogNeededGB))
+    $projLogFreePct = if ($st.LogCapGB -gt 0) { [math]::Round(($projLogFreeGB / $st.LogCapGB) * 100, 0) } else { 0 }
+
+    if ([int]$projDbFreePct -lt $MinFreePercent) {
+        $violations += "DB '$db' projiziert $projDbFreePct% < MinFreePercent=$MinFreePercent"
+    }
+    if ([int]$projLogFreePct -lt $MinLogFreePercent) {
+        $violations += "LOG '$db' projiziert $projLogFreePct% < MinLogFreePercent=$MinLogFreePercent"
     }
 }
 
 if ($violations.Count -gt 0) {
-    Write-Host "`nGUARDRAIL TRIGGERED – Abbruch, weil Limits überschritten:" -ForegroundColor Red
+    Write-Host "`nGUARDRAIL TRIGGERED – Abbruch:" -ForegroundColor Red
     $violations | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-    throw "Guardrails verletzt. Passe Limits/Filter an oder reduziere Zielmenge."
+    throw "Guardrails verletzt. Passe Batch/Filter an oder nimm eine weitere Ziel-DB dazu."
 }
 
 # === Optional: MoveRequests erstellen ===
@@ -666,3 +684,4 @@ foreach ($db in $targetDBs) {
 }
 
 Write-Host "`nDone." -ForegroundColor Green
+
