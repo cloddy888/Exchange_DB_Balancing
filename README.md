@@ -1,29 +1,30 @@
 # Exchange_DB_balancing
 
-Dieses PowerShell-Skript sammelt alle UserMailbox-Postfächer aus der Exchange-Organisation, ermittelt pro Postfach die Gesamtgröße (MB) und verteilt die Postfächer anschließend gewichtet auf eine definierte Liste von Ziel-Mailboxdatenbanken (DB01–DB04).
+This PowerShell script collects all user mailboxes from the Exchange organization, calculates the total size (MB) for each mailbox, and then distributes the mailboxes in a weighted manner across a defined list of target mailbox databases (DB01–DB04).
 
-Die Zuweisung passiert nach einem einfachen Load-Score, damit nicht eine DB „alles abbekommt“:
+The assignment is based on a simple load score to ensure that no single DB “takes on everything”:
 
-LoadScore = (Anzahl Postfächer in DB × 10) + (Summe der MB in DB)
+LoadScore = (Number of mailboxes in DB × 10) + (Total MB in DB)
 
-Für jedes Postfach wird immer die Datenbank gewählt, die aktuell den kleinsten Load-Score hat.
-Am Ende gibt das Skript eine Verteilungs-Vorschau aus und kann optional MoveRequests erstellen.
+For each mailbox, the script always selects the database that currently has the lowest load score.
+At the end, the script displays a preview of the distribution and can optionally create MoveRequests.
 
-Besonderheit: Die MoveRequests werden mit -SuspendWhenReadyToComplete angelegt – sie laufen also bis „kurz vor fertig“ und warten dann auf deine Freigabe zum finalen Cutover. (Sehr nett für Wartungsfenster, weil du die letzte Umschaltphase timen kannst.)
+Special feature: The MoveRequests are created with -SuspendWhenReadyToComplete—meaning they run until “just before completion” and then wait for your approval for the final cutover. (Very useful for maintenance windows, because you can time the final switchover phase.)
 
-**Parameter**
+*Parameters**
 
 _-WhatIf_ 
-Schaltet in den Simulationsmodus: Es werden keine MoveRequests erstellt, sondern nur die geplanten Aktionen ausgegeben.
+Enables simulation mode: No MoveRequests are created; only the planned actions are displayed.
 
-**Voraussetzungen / Kontext**
+**Prerequisites / Context**
 
-Ausführung in der Exchange Management Shell (oder PowerShell mit geladenen Exchange-Cmdlets).
+Run in the Exchange Management Shell (or PowerShell with Exchange cmdlets loaded).
 
-Berechtigungen für:
+Permissions for:
 
 Get-Mailbox, Get-MailboxStatistics
 
 _New-MoveRequest_
 
-Die Datenbanken in $targetDBs müssen existieren und erreichbar sein.
+The databases in $targetDBs must exist and be accessible.
+
