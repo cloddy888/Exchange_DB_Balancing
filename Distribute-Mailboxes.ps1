@@ -744,7 +744,7 @@ $allDbsTable += "<th>DB</th><th>IsTarget</th><th>Reason</th><th>DBVol</th><th>DB
 $allDbsTable += "<th>LogVol</th><th>Log Free% vorher</th><th>Log FreeGB vorher</th><th>LogNeed (GB)</th><th>Log Free% proj.</th><th>Log FreeGB proj.</th>"
 $allDbsTable += "</tr></thead><tbody>"
 
-# >>> HIER IST DER WICHTIGE FIX: Sort-Object mit Hashtables (kein Parserfehler mehr)
+# Sort-Object mit Hashtables 
 $sortedAllDbRows = $allDbRows | Sort-Object -Property `
     @{ Expression = 'ReasonOrder';  Ascending = $true  }, `
     @{ Expression = { if ($_.IsTarget -eq 'YES') { 1 } else { 0 } }; Ascending = $false }, `
